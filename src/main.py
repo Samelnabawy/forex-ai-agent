@@ -58,6 +58,7 @@ class Application:
         self._technical_agent: Any = None
         self._macro_agent: Any = None
         self._correlation_agent: Any = None
+        self._sentiment_agent: Any = None
 
     async def start(self) -> None:
         """Initialize all services and start the event loop."""
@@ -136,6 +137,18 @@ class Application:
         self._correlation_agent = CorrelationAgent()
         self._tasks.append(asyncio.create_task(
             self._loop("correlation_agent", self._run_correlation_agent, 60)
+        ))
+
+        # Sentiment Agent — runs every 30 minutes + breaking news triggers
+        from src.agents.sentiment import SentimentAgent
+        from src.data.ingestion.central_bank_feed import CentralBankFeed
+        cb_feed = CentralBankFeed()
+        self._sentiment_agent = SentimentAgent(
+            news_feed=self._news_feed,
+            cb_feed=cb_feed,
+        )
+        self._tasks.append(asyncio.create_task(
+            self._loop("sentiment_agent", self._run_sentiment_agent, 1800)
         ))
 
         # ── API Server ────────────────────────────────────────
@@ -242,6 +255,20 @@ class Application:
                 "Correlation Agent: regime=%s, cascades=%d, anomalies=%d",
                 regime, len(cascades), len(anomalies),
             )
+
+    async def _run_sentiment_agent(self) -> None:
+        """Run Sentiment Agent."""
+        from src.orchestration.market_state_builder import build_market_state
+
+        market_state = await build_market_state()
+        result = await self._sentiment_agent.run(market_state)
+
+        fg = result.get("fear_greed_index", {})
+        divergences = result.get("divergences", [])
+        logger.info(
+            "Sentiment Agent: fear_greed=%s (%s), divergences=%d",
+            fg.get("score", "?"), fg.get("label", "?"), len(divergences),
+        )
 
     # ── API Server ────────────────────────────────────────────
 
