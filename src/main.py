@@ -57,6 +57,7 @@ class Application:
         # Agents
         self._technical_agent: Any = None
         self._macro_agent: Any = None
+        self._correlation_agent: Any = None
 
     async def start(self) -> None:
         """Initialize all services and start the event loop."""
@@ -128,6 +129,13 @@ class Application:
         )
         self._tasks.append(asyncio.create_task(
             self._loop("macro_analyst", self._run_macro_agent, 3600)
+        ))
+
+        # Correlation Agent — runs every 1 minute (lightweight math, no LLM)
+        from src.agents.correlation import CorrelationAgent
+        self._correlation_agent = CorrelationAgent()
+        self._tasks.append(asyncio.create_task(
+            self._loop("correlation_agent", self._run_correlation_agent, 60)
         ))
 
         # ── API Server ────────────────────────────────────────
@@ -217,6 +225,23 @@ class Application:
                 "preferred_pairs": result.get("preferred_pairs", []),
             },
         )
+
+    async def _run_correlation_agent(self) -> None:
+        """Run Correlation Agent."""
+        from src.orchestration.market_state_builder import build_market_state
+
+        market_state = await build_market_state()
+        result = await self._correlation_agent.run(market_state)
+
+        cascades = result.get("active_cascades", [])
+        anomalies = result.get("anomalies", [])
+        regime = result.get("market_regime", {}).get("regime", "unknown")
+
+        if cascades or anomalies:
+            logger.info(
+                "Correlation Agent: regime=%s, cascades=%d, anomalies=%d",
+                regime, len(cascades), len(anomalies),
+            )
 
     # ── API Server ────────────────────────────────────────────
 
