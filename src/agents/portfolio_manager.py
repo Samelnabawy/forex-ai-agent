@@ -710,7 +710,7 @@ class PortfolioManagerAgent(BaseAgent):
         decision: dict[str, Any],
         proposal: TradeProposal,
     ) -> None:
-        """Execute an approved trade — send to Telegram + log."""
+        """Execute an approved trade — send to Telegram, optionally place on broker, log."""
         self.logger.info(
             "EXECUTING TRADE",
             extra={
@@ -728,6 +728,16 @@ class PortfolioManagerAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Telegram send failed", extra={"error": str(e)})
 
+        # Place order on Capital.com if AUTO_EXECUTE is enabled
+        broker_deal_id = None
+        try:
+            from src.config.settings import get_settings
+            settings = get_settings()
+            if settings.auto_execute and settings.capital_api_key.get_secret_value():
+                broker_deal_id = await self._place_broker_order(decision, proposal)
+        except Exception as e:
+            self.logger.error("Broker execution failed", extra={"error": str(e)})
+
         # Log trade
         try:
             from src.execution.trade_logger import log_new_trade
@@ -741,8 +751,93 @@ class PortfolioManagerAgent(BaseAgent):
             "instrument": proposal.instrument,
             "direction": proposal.direction,
             "entry": proposal.entry,
+            "stop_loss": proposal.stop_loss,
+            "take_profit_1": proposal.take_profit_1,
+            "atr": proposal.atr,
             "opened_at": datetime.now(timezone.utc).isoformat(),
+            "broker_deal_id": broker_deal_id,
+            "position_size_pct": decision.get("final_position_size", 0),
         })
+
+    async def _place_broker_order(
+        self,
+        decision: dict[str, Any],
+        proposal: TradeProposal,
+    ) -> str | None:
+        """Calculate lot size and place order on Capital.com. Returns position deal_id."""
+        from src.execution.broker_api import get_broker
+
+        broker = get_broker()
+        if not await broker._ensure_session():
+            self.logger.error("Broker auth failed — cannot execute")
+            return None
+
+        # Get account equity for position sizing
+        acct = await broker.get_account()
+        if not acct:
+            self.logger.error("Cannot fetch account — skipping broker execution")
+            return None
+
+        equity = acct["available"]
+        instrument = proposal.instrument
+        inst = INSTRUMENTS.get(instrument)
+        if not inst:
+            self.logger.error("Unknown instrument for broker", extra={"instrument": instrument})
+            return None
+
+        # Calculate lot size: (equity × position_size_pct) / (risk_pips × pip_value_per_lot)
+        position_size_pct = decision.get("final_position_size", 0)
+        risk_pips = abs(float(proposal.entry) - float(proposal.stop_loss)) / float(inst.pip_size)
+        pip_value = float(inst.pip_value_per_lot)
+
+        if risk_pips <= 0 or pip_value <= 0:
+            self.logger.error("Invalid risk calculation", extra={"risk_pips": risk_pips, "pip_value": pip_value})
+            return None
+
+        risk_amount = equity * (position_size_pct / 100)
+        lots = risk_amount / (risk_pips * pip_value)
+
+        # Get min size from broker
+        market_info = await broker.get_market_info(instrument)
+        min_size = float(market_info.get("min_size", 0.01)) if market_info else 0.01
+
+        # Capital.com uses raw units for forex (1 lot = 100,000 units)
+        # Convert lots to units depending on instrument type
+        if inst.category.value in ("major", "minor", "cross"):
+            size = max(round(lots * 100_000, 0), min_size)  # forex: lots → units
+        else:
+            size = max(round(lots, 2), min_size)  # commodities: lots directly
+
+        direction = "BUY" if proposal.direction == "LONG" else "SELL"
+
+        self.logger.info(
+            "Placing broker order",
+            extra={
+                "instrument": instrument,
+                "direction": direction,
+                "size": size,
+                "equity": equity,
+                "risk_pct": position_size_pct,
+                "risk_pips": round(risk_pips, 1),
+                "lots": round(lots, 4),
+            },
+        )
+
+        result = await broker.open_position(
+            instrument=instrument,
+            direction=direction,
+            size=size,
+            stop_loss=float(proposal.stop_loss),
+            take_profit=float(proposal.take_profit_1),
+        )
+
+        if result and result.get("status") == "ACCEPTED":
+            deal_id = result.get("position_deal_id", result.get("deal_id"))
+            self.logger.info("Broker order ACCEPTED", extra={"deal_id": deal_id, "level": result.get("level")})
+            return deal_id
+
+        self.logger.error("Broker order REJECTED", extra={"result": result})
+        return None
 
     @property
     def stats(self) -> dict[str, Any]:

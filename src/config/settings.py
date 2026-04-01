@@ -89,9 +89,16 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_chat_id: str = ""
 
+    # ── Capital.com Broker ────────────────────────────────────
+    capital_api_key: SecretStr = SecretStr("")
+    capital_email: str = ""
+    capital_password: SecretStr = SecretStr("")
+    capital_environment: str = "demo"  # "demo" or "live"
+
     # ── Trading ───────────────────────────────────────────────
     initial_capital: float = 10_000.0
     paper_trading: bool = True
+    auto_execute: bool = False
 
     # ── Monitoring ────────────────────────────────────────────
     prometheus_port: int = 9100

@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any, AsyncGenerator
 
 import aiohttp
+import websockets
 
 from src.config.instruments import ALL_SYMBOLS, INSTRUMENTS
 from src.config.settings import get_settings
@@ -139,7 +140,7 @@ class TwelveDataProvider(PriceProvider):
         self._api_key = get_settings().twelve_data_api_key.get_secret_value()
 
     def websocket_url(self) -> str:
-        return "wss://ws.twelvedata.com/v1/quotes/price"
+        return f"wss://ws.twelvedata.com/v1/quotes/price?apikey={self._api_key}"
 
     def subscribe_message(self, symbols: list[str]) -> dict[str, Any]:
         td_symbols = []
@@ -151,7 +152,6 @@ class TwelveDataProvider(PriceProvider):
             "action": "subscribe",
             "params": {
                 "symbols": ",".join(td_symbols),
-                "apikey": self._api_key,
             },
         }
 
@@ -217,6 +217,11 @@ class PriceFeedManager:
         self._tick_count = 0
         self._last_tick_ts: datetime | None = None
 
+    @property
+    def _use_websockets_lib(self) -> bool:
+        """Use websockets library for providers that need it (e.g. Twelve Data)."""
+        return isinstance(self.provider, TwelveDataProvider)
+
     async def start(self) -> None:
         """Start the WebSocket feed with automatic reconnection."""
         self._running = True
@@ -227,7 +232,10 @@ class PriceFeedManager:
 
         while self._running:
             try:
-                await self._connect_and_consume()
+                if self._use_websockets_lib:
+                    await self._connect_websockets()
+                else:
+                    await self._connect_and_consume()
             except Exception as e:
                 if not self._running:
                     break
@@ -276,6 +284,22 @@ class PriceFeedManager:
                     elif msg.type == aiohttp.WSMsgType.CLOSED:
                         logger.warning("WebSocket closed by server")
                         break
+
+    async def _connect_websockets(self) -> None:
+        """Connect using websockets library (for Twelve Data compatibility)."""
+        url = self.provider.websocket_url()
+        async with websockets.connect(url, ping_interval=30, ping_timeout=10) as ws:
+            logger.info("WebSocket connected", extra={"provider": self.provider.name})
+            self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
+
+            sub_msg = self.provider.subscribe_message(self.symbols)
+            await ws.send(json.dumps(sub_msg))
+            logger.info("Subscribed to symbols", extra={"count": len(self.symbols)})
+
+            async for raw in ws:
+                if not self._running:
+                    break
+                await self._handle_message(raw)
 
     async def _handle_message(self, raw: str) -> None:
         """Parse and fan-out a WebSocket message."""

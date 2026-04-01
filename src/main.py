@@ -79,11 +79,11 @@ class Application:
 
         # ── Data Feeds ────────────────────────────────────────
 
-        # Price feed (WebSocket)
-        if self.settings.polygon_api_key.get_secret_value():
-            provider = PolygonProvider()
-        elif self.settings.twelve_data_api_key.get_secret_value():
+        # Price feed (WebSocket) — prefer Twelve Data for forex intraday
+        if self.settings.twelve_data_api_key.get_secret_value():
             provider = TwelveDataProvider()
+        elif self.settings.polygon_api_key.get_secret_value():
+            provider = PolygonProvider()
         else:
             logger.warning("No price data provider configured — price feed disabled")
             provider = None
@@ -158,6 +158,13 @@ class Application:
         self._tasks.append(asyncio.create_task(
             self._loop("portfolio_manager", self._run_portfolio_manager, 30)
         ))
+
+        # Position Manager — monitors open trades every 60 seconds
+        if self.settings.auto_execute and self.settings.capital_api_key.get_secret_value():
+            self._tasks.append(asyncio.create_task(
+                self._loop("position_manager", self._manage_open_positions, 60)
+            ))
+            logger.info("Position manager enabled (AUTO_EXECUTE=true)")
 
         # ── API Server ────────────────────────────────────────
 
@@ -293,6 +300,100 @@ class Application:
                 d.get("direction", "?"),
                 d.get("final_decision", "?"),
             )
+
+    async def _manage_open_positions(self) -> None:
+        """Monitor open broker positions and apply risk management actions."""
+        from src.agents.risk_models import evaluate_open_position
+        from src.execution.broker_api import get_broker
+        from src.data.storage.cache import get_latest_price
+
+        broker = get_broker()
+        positions = await broker.get_positions()
+        if not positions:
+            return
+
+        for pos in positions:
+            instrument = pos.get("instrument", "")
+            deal_id = pos.get("deal_id", "")
+            if not instrument or not deal_id:
+                continue
+
+            # Get current price
+            price_data = await get_latest_price(instrument)
+            if not price_data:
+                continue
+            current_price = float(price_data.get("mid", 0))
+            if current_price == 0:
+                continue
+
+            # Build trade dict for evaluate_open_position
+            direction = "LONG" if pos.get("direction") == "BUY" else "SHORT"
+            trade = {
+                "trade_id": deal_id,
+                "direction": direction,
+                "entry_price": pos.get("open_level", 0),
+                "stop_loss": pos.get("stop_level", 0),
+                "take_profit_1": pos.get("profit_level", 0),
+            }
+
+            # Compute hours open
+            created = pos.get("created", "")
+            hours_open = 0.0
+            if created:
+                try:
+                    from datetime import datetime, timezone
+                    opened_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    hours_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+                except Exception:
+                    pass
+
+            # Get ATR (use instrument default if not available)
+            from src.config.instruments import INSTRUMENTS
+            inst = INSTRUMENTS.get(instrument)
+            atr = float(inst.avg_daily_range_pips * inst.pip_size) if inst else 0.001
+
+            action = evaluate_open_position(
+                trade=trade,
+                current_price=current_price,
+                atr=atr,
+                hours_open=hours_open,
+            )
+
+            if action.action == "hold":
+                continue
+
+            logger.info(
+                "Position action: %s %s → %s",
+                instrument, deal_id[:12], action.action,
+                extra={"reasoning": action.reasoning, "urgency": action.urgency},
+            )
+
+            if action.action == "trail_stop" and action.new_stop is not None:
+                await broker.update_position(deal_id, stop_loss=action.new_stop)
+                logger.info("Trailing stop updated", extra={"deal_id": deal_id, "new_stop": action.new_stop})
+
+            elif action.action in ("close", "emergency_close"):
+                result = await broker.close_position(deal_id)
+                if result and result.get("status") == "ACCEPTED":
+                    logger.info("Position closed by risk manager", extra={
+                        "deal_id": deal_id, "reason": action.reasoning, "pnl": result.get("profit_loss"),
+                    })
+                    # Send Telegram alert
+                    try:
+                        from src.execution.telegram_bot import send_alert
+                        await send_alert(
+                            "position_closed",
+                            f"{instrument} {direction} closed: {action.reasoning}",
+                            action.urgency,
+                        )
+                    except Exception:
+                        pass
+
+            elif action.action == "partial_close":
+                # Capital.com doesn't support partial close directly — log for manual action
+                logger.info("Partial close recommended (manual)", extra={
+                    "deal_id": deal_id, "close_pct": action.close_pct, "reasoning": action.reasoning,
+                })
 
     # ── API Server ────────────────────────────────────────────
 
