@@ -234,7 +234,7 @@ class TestKelly:
     def test_positive_expectancy(self) -> None:
         f = compute_kelly_fraction(0.6, 40, 20)
         assert f > 0
-        assert f < 0.25  # Capped
+        assert f <= 0.25  # Capped
 
     def test_negative_expectancy(self) -> None:
         f = compute_kelly_fraction(0.3, 20, 40)

@@ -49,7 +49,7 @@ from src.agents.correlation_math import (
     detect_cascades,
     detect_correlation_anomalies,
     detect_lead_lag,
-    test_cointegration,
+    check_cointegration,
 )
 from src.config.instruments import (
     ALL_SYMBOLS,
@@ -211,7 +211,7 @@ class CorrelationAgent(BaseAgent):
         if len(prices_df) >= 100 and self._should_run_expensive():
             for pair_a, pair_b in COINTEGRATION_PAIRS:
                 if pair_a in prices_df.columns and pair_b in prices_df.columns:
-                    coint = test_cointegration(prices_df[pair_a], prices_df[pair_b])
+                    coint = check_cointegration(prices_df[pair_a], prices_df[pair_b])
                     if coint.is_cointegrated or abs(coint.spread_z_score) > 1.5:
                         cointegration.append({
                             "pair_a": coint.pair_a,

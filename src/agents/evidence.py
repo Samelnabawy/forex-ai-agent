@@ -250,7 +250,11 @@ def aggregate_evidence(evidence_list: list[Evidence]) -> dict[str, Any]:
 
     total = supporting_weight + opposing_weight + neutral_weight
     if total == 0:
-        return {"supporting": 0, "opposing": 0, "net": 0, "conviction": 0}
+        return {
+            "supporting_weight": 0, "opposing_weight": 0, "neutral_weight": 0,
+            "net_weight": 0, "conviction": 0, "evidence_count": len(evidence_list),
+            "strong_evidence": 0,
+        }
 
     net = supporting_weight - opposing_weight
     conviction = (net / total) * 100 if total > 0 else 0

@@ -656,7 +656,7 @@ def detect_reflexivity(
     if cot_momentum == "unwinding":
         strength *= 0.8  # Discount if positioning is reversing
 
-    if strength < 30:
+    if strength < 20:
         return None
 
     reasoning_parts = [f"30d move: {price_change_30d_pct:+.2f}%"]

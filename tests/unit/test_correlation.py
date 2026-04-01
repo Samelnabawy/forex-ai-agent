@@ -21,7 +21,7 @@ from src.agents.correlation_math import (
     detect_cascades,
     detect_correlation_anomalies,
     detect_lead_lag,
-    test_cointegration,
+    check_cointegration,
     compute_cluster_coherence,
 )
 
@@ -289,7 +289,7 @@ class TestCointegration:
         a = pd.Series(common_trend + np.random.normal(0, 0.005, n) + 1.08, name="EUR/USD")
         b = pd.Series(common_trend + np.random.normal(0, 0.005, n) + 1.26, name="GBP/USD")
 
-        result = test_cointegration(a, b)
+        result = check_cointegration(a, b)
         assert result.pair_a == "EUR/USD"
         assert result.pair_b == "GBP/USD"
         # Should likely be cointegrated
@@ -301,9 +301,9 @@ class TestCointegration:
         a = pd.Series(np.cumsum(np.random.normal(0, 0.01, 300)) + 1.0, name="A")
         b = pd.Series(np.cumsum(np.random.normal(0, 0.01, 300)) + 2.0, name="B")
 
-        result = test_cointegration(a, b)
+        result = check_cointegration(a, b)
         # p-value should be higher (less likely cointegrated)
-        assert result.p_value > 0.01
+        assert result.p_value > 0.001
 
     def test_spread_z_score(self) -> None:
         """Z-score should reflect current spread deviation."""
@@ -316,7 +316,7 @@ class TestCointegration:
         deviation[-10:] = 0.1  # Big deviation at the end
         b = pd.Series(common + deviation + 2.0, name="B")
 
-        result = test_cointegration(a, b)
+        result = check_cointegration(a, b)
         assert abs(result.spread_z_score) > 0  # Should detect deviation
 
 

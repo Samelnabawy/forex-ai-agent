@@ -127,8 +127,8 @@ class CointegrationResult:
     p_value: float
     current_spread: float
     spread_z_score: float
-    half_life_bars: float | None = None
     signal: str  # "long_a_short_b", "short_a_long_b", "neutral"
+    half_life_bars: float | None = None
 
 
 # ── Correlation Matrix Computation ────────────────────────────
@@ -571,7 +571,7 @@ def compute_betas(
 
 # ── Cointegration Testing ─────────────────────────────────────
 
-def test_cointegration(
+def check_cointegration(
     series_a: pd.Series,
     series_b: pd.Series,
     significance: float = 0.05,

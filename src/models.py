@@ -10,7 +10,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Enums ─────────────────────────────────────────────────────
@@ -82,16 +82,11 @@ class PriceTick(BaseModel):
     ts: datetime
     spread: Decimal = Decimal("0")
 
-    @field_validator("spread", mode="before")
-    @classmethod
-    def compute_spread(cls, v: Any, info: Any) -> Decimal:
-        if v and Decimal(str(v)) > 0:
-            return Decimal(str(v))
-        # Auto-compute from bid/ask if not provided
-        data = info.data
-        if "bid" in data and "ask" in data:
-            return Decimal(str(data["ask"])) - Decimal(str(data["bid"]))
-        return Decimal("0")
+    @model_validator(mode="after")
+    def compute_spread(self) -> "PriceTick":
+        if self.spread == Decimal("0") and self.bid and self.ask:
+            self.spread = self.ask - self.bid
+        return self
 
 
 class MarketState(BaseModel):
