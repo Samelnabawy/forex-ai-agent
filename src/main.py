@@ -59,6 +59,7 @@ class Application:
         self._macro_agent: Any = None
         self._correlation_agent: Any = None
         self._sentiment_agent: Any = None
+        self._portfolio_manager: Any = None
 
     async def start(self) -> None:
         """Initialize all services and start the event loop."""
@@ -149,6 +150,13 @@ class Application:
         )
         self._tasks.append(asyncio.create_task(
             self._loop("sentiment_agent", self._run_sentiment_agent, 1800)
+        ))
+
+        # Portfolio Manager — processes signal queue every 30 seconds
+        from src.agents.portfolio_manager import PortfolioManagerAgent
+        self._portfolio_manager = PortfolioManagerAgent()
+        self._tasks.append(asyncio.create_task(
+            self._loop("portfolio_manager", self._run_portfolio_manager, 30)
         ))
 
         # ── API Server ────────────────────────────────────────
@@ -269,6 +277,22 @@ class Application:
             "Sentiment Agent: fear_greed=%s (%s), divergences=%d",
             fg.get("score", "?"), fg.get("label", "?"), len(divergences),
         )
+
+    async def _run_portfolio_manager(self) -> None:
+        """Run Portfolio Manager — processes signal queue."""
+        from src.orchestration.market_state_builder import build_market_state
+
+        market_state = await build_market_state()
+        result = await self._portfolio_manager.run(market_state)
+
+        decisions = result.get("decisions", [])
+        for d in decisions:
+            logger.info(
+                "Portfolio Manager: %s %s → %s",
+                d.get("instrument", "?"),
+                d.get("direction", "?"),
+                d.get("final_decision", "?"),
+            )
 
     # ── API Server ────────────────────────────────────────────
 
