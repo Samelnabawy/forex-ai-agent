@@ -52,11 +52,18 @@ BACKFILL_YEARS: dict[str, int] = {
     "15m": 5,   # 5 years
     "1h": 10,   # 10 years
     "4h": 10,   # 10 years
-    "1d": 20,   # 20 years
+    "1d": 2,    # 2 years (free Polygon tier limit)
 }
 
 BATCH_SIZE = 1000
 MAX_CONCURRENT_REQUESTS = 2  # Polygon free tier is limited
+
+# Instruments that should be backfilled from FRED instead of Polygon.
+# Maps instrument symbol → FRED series ID.
+FRED_INSTRUMENTS: dict[str, str] = {
+    "WTI": "DCOILWTICO",
+}
+FRED_BACKFILL_YEARS = 5  # FRED has deep history; 5 years is plenty
 
 
 class HistoricalBackfill:
@@ -120,6 +127,12 @@ class HistoricalBackfill:
                     return await self._fetch_polygon_aggs(
                         symbol, multiplier, timespan, from_ts, to_ts
                     )
+                if e.response.status_code == 403:
+                    logger.warning(
+                        "Polygon 403 — skipping chunk (plan limit)",
+                        extra={"symbol": symbol, "from": from_str, "to": to_str},
+                    )
+                    return []
                 raise
             except Exception as e:
                 logger.error(
@@ -221,6 +234,8 @@ class HistoricalBackfill:
 
         for tf in sorted_tfs:
             for symbol in symbols:
+                if symbol in FRED_INSTRUMENTS:
+                    continue  # Handled by FREDBackfill
                 key = f"{symbol}:{tf}"
                 logger.info("Starting backfill", extra={"key": key})
                 count = await self.backfill_instrument_timeframe(symbol, tf)
@@ -228,6 +243,113 @@ class HistoricalBackfill:
                 logger.info("Completed backfill", extra={"key": key, "candles": count})
 
         return results
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
+class FREDBackfill:
+    """Backfills daily candles from FRED for instruments Polygon doesn't cover."""
+
+    FRED_BASE_URL = "https://api.stlouisfed.org/fred"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._api_key = settings.fred_api_key.get_secret_value()
+        self._client: httpx.AsyncClient | None = None
+        self._total_candles = 0
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def _fetch_fred_series(
+        self,
+        series_id: str,
+        observation_start: str,
+        observation_end: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch observations from FRED API (ascending order, up to 100k)."""
+        client = await self._get_client()
+        try:
+            resp = await client.get(
+                f"{self.FRED_BASE_URL}/series/observations",
+                params={
+                    "series_id": series_id,
+                    "api_key": self._api_key,
+                    "file_type": "json",
+                    "sort_order": "asc",
+                    "limit": 100000,
+                    "observation_start": observation_start,
+                    "observation_end": observation_end,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json().get("observations", [])
+        except Exception as e:
+            logger.error("FRED fetch failed", extra={"series": series_id, "error": str(e)})
+            return []
+
+    async def backfill_instrument(self, symbol: str, timeframe: str = "1d") -> int:
+        """Backfill daily candles for a FRED-sourced instrument."""
+        if timeframe != "1d":
+            logger.info("FRED only provides daily data, skipping", extra={"symbol": symbol, "timeframe": timeframe})
+            return 0
+
+        series_id = FRED_INSTRUMENTS[symbol]
+
+        # Resume-aware start date
+        last_ts = await get_latest_timestamp(symbol, timeframe)
+        if last_ts:
+            start = last_ts + timedelta(days=1)
+            logger.info("Resuming FRED backfill", extra={"symbol": symbol, "from": start.isoformat()})
+        else:
+            start = datetime.now(timezone.utc) - timedelta(days=FRED_BACKFILL_YEARS * 365)
+
+        end = datetime.now(timezone.utc)
+        if start >= end:
+            logger.info("FRED backfill up to date", extra={"symbol": symbol})
+            return 0
+
+        observations = await self._fetch_fred_series(
+            series_id,
+            observation_start=start.strftime("%Y-%m-%d"),
+            observation_end=end.strftime("%Y-%m-%d"),
+        )
+
+        # Convert to CandleRecords (FRED only gives close price)
+        candles: list[CandleRecord] = []
+        for obs in observations:
+            val = obs.get("value", ".")
+            if val == ".":
+                continue  # FRED uses "." for missing data
+            price = Decimal(val)
+            ts = datetime.strptime(obs["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            candles.append(CandleRecord(
+                instrument=symbol,
+                timeframe=timeframe,
+                ts=ts,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=Decimal("0"),
+            ))
+
+        total_inserted = 0
+        for i in range(0, len(candles), BATCH_SIZE):
+            batch = candles[i : i + BATCH_SIZE]
+            await upsert_candles(batch)
+            total_inserted += len(batch)
+
+        self._total_candles += total_inserted
+        logger.info(
+            "FRED backfill complete",
+            extra={"symbol": symbol, "series": series_id, "candles": total_inserted},
+        )
+        return total_inserted
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -262,8 +384,18 @@ async def main() -> None:
     await init_db()
 
     backfill = HistoricalBackfill()
+    fred_backfill = FREDBackfill()
     try:
         results = await backfill.backfill_all(symbols, timeframes)
+
+        # FRED backfill for instruments Polygon doesn't cover
+        fred_symbols = [s for s in symbols if s in FRED_INSTRUMENTS]
+        for symbol in fred_symbols:
+            for tf in timeframes:
+                key = f"{symbol}:{tf}"
+                count = await fred_backfill.backfill_instrument(symbol, tf)
+                results[key] = count
+
         total = sum(results.values())
         logger.info(
             "Backfill complete",
@@ -271,6 +403,7 @@ async def main() -> None:
         )
     finally:
         await backfill.close()
+        await fred_backfill.close()
         await close_db()
 
 

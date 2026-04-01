@@ -92,12 +92,12 @@ async def similarity_search(
             market_context,
             price_impact,
             tags,
-            1 - (embedding <=> :embedding::vector) AS similarity
+            1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
         FROM market_events
         WHERE embedding IS NOT NULL
           AND {where_clause}
-          AND 1 - (embedding <=> :embedding::vector) >= :min_sim
-        ORDER BY embedding <=> :embedding::vector
+          AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :min_sim
+        ORDER BY embedding <=> CAST(:embedding AS vector)
         LIMIT :top_k
     """)
 

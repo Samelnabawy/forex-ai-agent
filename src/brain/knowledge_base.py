@@ -269,7 +269,7 @@ class HistoricalBrain:
                          market_context, price_impact, tags, embedding)
                     VALUES
                         (:ts, :event_type, :event_name, :description, :affected_pairs,
-                         :market_context, :price_impact, :tags, :embedding::vector)
+                         :market_context, :price_impact, :tags, CAST(:embedding AS vector))
                     RETURNING id
                 """),
                 {
