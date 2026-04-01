@@ -70,12 +70,23 @@ class MacroAnalystAgent(BaseAgent):
     description: ClassVar[str] = "Central bank policy, economic data, rate expectations"
     execution_frequency: ClassVar[str] = "1h"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        fred_feed: Any | None = None,
+        oil_feed: Any | None = None,
+        market_feed: Any | None = None,
+        news_feed: Any | None = None,
+    ) -> None:
         super().__init__()
         self._llm = get_llm_client()
         self._geo_tracker = GeopoliticalTracker()
         self._last_regime: str = "neutral"
         self._regime_change_count: int = 0
+        # Shared feed instances — injected by the application, not created per call
+        self._fred_feed = fred_feed
+        self._oil_feed = oil_feed
+        self._market_feed = market_feed
+        self._news_feed = news_feed
 
     async def analyze(self, market_state: MarketState) -> dict[str, Any]:
         """
@@ -158,44 +169,43 @@ class MacroAnalystAgent(BaseAgent):
             "geopolitical": {},
         }
 
-        # Bond yields and rate differentials (FRED)
-        try:
-            from src.data.ingestion.fred_feed import FREDFeed
-            fred = FREDFeed()
-            macro_data = await fred.get_full_macro_data()
-            context["yield_curve"] = macro_data.get("yield_curve", {})
-            context["rate_differentials"] = macro_data.get("rate_differentials", {})
-            context["real_rates"] = macro_data.get("real_rates", {})
-            context["economic_data"] = macro_data.get("economic_data", {})
-            await fred.close()
-        except Exception as e:
-            self.logger.error("FRED data fetch failed", extra={"error": str(e)})
+        # Bond yields and rate differentials (FRED) — use shared instance
+        if self._fred_feed:
+            try:
+                macro_data = await self._fred_feed.get_full_macro_data()
+                context["yield_curve"] = macro_data.get("yield_curve", {})
+                context["rate_differentials"] = macro_data.get("rate_differentials", {})
+                context["real_rates"] = macro_data.get("real_rates", {})
+                context["economic_data"] = macro_data.get("economic_data", {})
+            except Exception as e:
+                self.logger.error("FRED data fetch failed", extra={"error": str(e)})
 
-        # Commodity data
-        try:
-            from src.data.ingestion.oil_commodity_feed import OilCommodityFeed
-            oil_feed = OilCommodityFeed()
-            context["commodity_data"] = await oil_feed.get_commodity_context()
-            await oil_feed.close()
-        except Exception as e:
-            self.logger.error("Commodity data fetch failed", extra={"error": str(e)})
+        # Commodity data — use shared instance
+        if self._oil_feed:
+            try:
+                context["commodity_data"] = await self._oil_feed.get_commodity_context()
+            except Exception as e:
+                self.logger.error("Commodity data fetch failed", extra={"error": str(e)})
 
-        # DXY and VIX
-        try:
-            from src.data.ingestion.market_feed import MarketDataFeed
-            market_feed = MarketDataFeed()
-            await market_feed.sync_all()
-            context["dxy"] = await market_feed.get_dxy()
-            context["vix"] = await market_feed.get_vix()
-            await market_feed.close()
-        except Exception as e:
-            self.logger.error("Market data fetch failed", extra={"error": str(e)})
+        # DXY and VIX — use shared instance
+        if self._market_feed:
+            try:
+                context["dxy"] = await self._market_feed.get_dxy()
+                context["vix"] = await self._market_feed.get_vix()
+            except Exception as e:
+                self.logger.error("Market data fetch failed", extra={"error": str(e)})
 
-        # Current prices from Redis
-        try:
-            context["prices"] = await get_all_prices()
-        except Exception as e:
-            self.logger.error("Price cache read failed", extra={"error": str(e)})
+        # Current prices — use MarketState (already fetched)
+        if market_state.prices:
+            context["prices"] = {
+                sym: {"mid": str((tick.bid + tick.ask) / 2), "bid": str(tick.bid), "ask": str(tick.ask)}
+                for sym, tick in market_state.prices.items()
+            }
+        else:
+            try:
+                context["prices"] = await get_all_prices()
+            except Exception as e:
+                self.logger.error("Price cache read failed", extra={"error": str(e)})
 
         # Session context
         session_ctx = get_session_context()
@@ -209,15 +219,13 @@ class MacroAnalystAgent(BaseAgent):
             "aus_fiscal_yearend": session_ctx.aus_fiscal_yearend,
         }
 
-        # Recent news headlines
-        try:
-            from src.data.ingestion.news_feed import NewsFeed
-            news = NewsFeed()
-            unprocessed = await news.get_unprocessed(limit=20)
-            context["recent_news"] = [h.get("headline", "") for h in unprocessed if h.get("headline")]
-            await news.close()
-        except Exception as e:
-            self.logger.error("News fetch failed", extra={"error": str(e)})
+        # Recent news headlines — use shared instance
+        if self._news_feed:
+            try:
+                unprocessed = await self._news_feed.get_unprocessed(limit=20)
+                context["recent_news"] = [h.get("headline", "") for h in unprocessed if h.get("headline")]
+            except Exception as e:
+                self.logger.error("News fetch failed", extra={"error": str(e)})
 
         # Geopolitical risk
         try:
