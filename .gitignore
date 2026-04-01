@@ -1,0 +1,41 @@
+# ── Python ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Environment ─────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE ─────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Docker volumes ──────────────────────────────
+postgres_data/
+redis_data/
+grafana_data/
+
+# ── Testing ─────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# ── Jupyter ─────────────────────────────────────
+.ipynb_checkpoints/
+notebooks/*.csv
+notebooks/*.json
+
+# ── OS ──────────────────────────────────────────
+.DS_Store
+Thumbs.db

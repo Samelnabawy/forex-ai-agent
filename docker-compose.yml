@@ -1,0 +1,81 @@
+
+
+services:
+  # ── PostgreSQL 16 + pgvector + TimescaleDB ──────────────────
+  postgres:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.postgres
+    container_name: forex-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-forex_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-forex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forex} -d ${POSTGRES_DB:-forex_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis (cache + BullMQ queue) ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: forex-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Application (all agents in one container for Phase 1) ───
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: forex-app
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"    # FastAPI
+      - "9100:9100"    # Prometheus metrics
+    volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Grafana (monitoring dashboard) ──────────────────────────
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: forex-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  grafana_data:
