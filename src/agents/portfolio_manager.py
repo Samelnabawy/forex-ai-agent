@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 class TriageLevel:
     NOISE = "noise"           # < 50 confluence → drop
-    WEAK = "weak"             # 50-60 → risk check only, skip debate
+    WEAK = "weak"             # 50-60 → full debate
     STANDARD = "standard"     # 60-75 → full debate
     STRONG = "strong"         # 75-90 → full debate + priority
     EXCEPTIONAL = "exceptional"  # 90+ → full debate + extra queries + alert
@@ -151,6 +151,11 @@ def compute_decision_matrix(
     if sentiment_extreme:
         # Contrarian signal from sentiment → reduce size regardless
         base_size *= 0.7
+
+    # Debate override: if the debate concluded EXECUTE with strong conviction,
+    # it has already synthesized all agent inputs — don't let the matrix veto it
+    if debate_conviction >= 60 and base_size < 0.4:
+        base_size = 0.4
 
     # Cap at 1.0 (1% risk)
     base_size = max(0, min(base_size, 1.0))
@@ -469,15 +474,11 @@ class PortfolioManagerAgent(BaseAgent):
         # Triage level determines processing depth
         level = triage_signal(signal)
 
-        if level == TriageLevel.WEAK:
-            # Skip debate, just run risk check
-            decision = await self._quick_decision(proposal, signal, market_state)
-        else:
-            # Full pipeline: debate → risk → decide
-            decision = await self._full_pipeline(proposal, signal, market_state)
+        # All signals that pass triage get the full debate pipeline
+        decision = await self._full_pipeline(proposal, signal, market_state)
 
         # Execute if approved
-        if decision.get("final_decision") in ("EXECUTE", "EXECUTE_FULL", "EXECUTE_STANDARD", "EXECUTE_REDUCED"):
+        if decision.get("final_decision") in ("EXECUTE", "EXECUTE_FULL", "EXECUTE_STANDARD", "EXECUTE_REDUCED", "EXECUTE_MODIFIED"):
             await self._execute_trade(decision, proposal)
             self._executions += 1
         else:

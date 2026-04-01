@@ -354,11 +354,15 @@ def check_quality_gate(
     """
     result = QualityGateResult()
 
+    MIN_CONVICTION = 60
+    MIN_EVIDENCE = 3
+    MIN_EV_RISK = 0.3
+
     # Minimum debate conviction
-    if debate_conviction < 60:
+    if debate_conviction < MIN_CONVICTION:
         result.passed = False
-        result.reasons.append(f"Debate conviction {debate_conviction:.0f} < 60 minimum")
-    result.checks["conviction"] = {"value": debate_conviction, "min": 60, "pass": debate_conviction >= 60}
+        result.reasons.append(f"Debate conviction {debate_conviction:.0f} < {MIN_CONVICTION} minimum")
+    result.checks["conviction"] = {"value": debate_conviction, "min": MIN_CONVICTION, "pass": debate_conviction >= MIN_CONVICTION}
 
     # Positive expected value
     if expected_value_pips <= 0:
@@ -367,16 +371,16 @@ def check_quality_gate(
     result.checks["expected_value"] = {"value": expected_value_pips, "min": 0, "pass": expected_value_pips > 0}
 
     # EV efficiency
-    if ev_per_risk < 0.3:
+    if ev_per_risk < MIN_EV_RISK:
         result.passed = False
-        result.reasons.append(f"EV/risk {ev_per_risk:.2f} < 0.3 minimum")
-    result.checks["ev_efficiency"] = {"value": ev_per_risk, "min": 0.3, "pass": ev_per_risk >= 0.3}
+        result.reasons.append(f"EV/risk {ev_per_risk:.2f} < {MIN_EV_RISK} minimum")
+    result.checks["ev_efficiency"] = {"value": ev_per_risk, "min": MIN_EV_RISK, "pass": ev_per_risk >= MIN_EV_RISK}
 
     # Evidence confluence
-    if evidence_sources < 3:
+    if evidence_sources < MIN_EVIDENCE:
         result.passed = False
-        result.reasons.append(f"Only {evidence_sources} evidence sources (min 3)")
-    result.checks["confluence"] = {"value": evidence_sources, "min": 3, "pass": evidence_sources >= 3}
+        result.reasons.append(f"Only {evidence_sources} evidence sources (min {MIN_EVIDENCE})")
+    result.checks["confluence"] = {"value": evidence_sources, "min": MIN_EVIDENCE, "pass": evidence_sources >= MIN_EVIDENCE}
 
     # Signal freshness
     if signal_age_minutes > 30:
