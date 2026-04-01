@@ -130,16 +130,30 @@ class BaseAgent(ABC):
     ) -> list[HistoricalMatch]:
         """
         Query the Historical Brain for precedents.
-        Placeholder — will be connected in Week 4 when the Brain is built.
+        All agents can call this to find "what happened last time?"
         """
         self.logger.debug(
             "Brain query",
             extra={"query": query_text, "top_k": top_k},
         )
 
-        # TODO: Connect to brain/query_engine.py when implemented
-        # For now, return empty to allow agents to function without the brain
-        return []
+        try:
+            from src.brain.knowledge_base import get_brain
+            brain = get_brain()
+            filters = filters or {}
+            return await brain.query(
+                query_text=query_text,
+                top_k=top_k,
+                event_type=filters.get("event_type"),
+                affected_pairs=filters.get("affected_pairs"),
+                date_from=filters.get("date_from"),
+                date_to=filters.get("date_to"),
+                tags=filters.get("tags"),
+                requesting_agent=self.name,
+            )
+        except Exception as e:
+            self.logger.error("Brain query failed", extra={"error": str(e)})
+            return []
 
     # ── Decision Persistence ──────────────────────────────────
 
