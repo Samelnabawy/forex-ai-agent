@@ -65,6 +65,15 @@ FRED_INSTRUMENTS: dict[str, str] = {
 }
 FRED_BACKFILL_YEARS = 5  # FRED has deep history; 5 years is plenty
 
+# Twelve Data intraday backfill config (free tier: 800 calls/day)
+TWELVE_DATA_TIMEFRAMES: dict[str, tuple[str, int]] = {
+    "15m": ("15min", 7),    # interval, days_back
+    "1h": ("1h", 30),
+    "4h": ("4h", 90),       # 90 days of 4h data
+}
+# Skip WTI for Twelve Data (use FRED for that)
+TWELVE_DATA_SKIP = {"WTI"}
+
 
 class HistoricalBackfill:
     """Manages historical data backfill from Polygon.io."""
@@ -236,6 +245,8 @@ class HistoricalBackfill:
             for symbol in symbols:
                 if symbol in FRED_INSTRUMENTS:
                     continue  # Handled by FREDBackfill
+                if tf in TWELVE_DATA_TIMEFRAMES:
+                    continue  # Intraday handled by TwelveDataBackfill
                 key = f"{symbol}:{tf}"
                 logger.info("Starting backfill", extra={"key": key})
                 count = await self.backfill_instrument_timeframe(symbol, tf)
@@ -356,6 +367,142 @@ class FREDBackfill:
             await self._client.aclose()
 
 
+class TwelveDataBackfill:
+    """Backfills intraday candles (15m, 1h) from Twelve Data REST API."""
+
+    BASE_URL = "https://api.twelvedata.com"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._api_key = settings.twelve_data_api_key.get_secret_value()
+        self._client: httpx.AsyncClient | None = None
+        self._total_candles = 0
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def _fetch_time_series(
+        self,
+        td_symbol: str,
+        interval: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch OHLCV from Twelve Data time_series endpoint."""
+        client = await self._get_client()
+        try:
+            resp = await client.get(
+                f"{self.BASE_URL}/time_series",
+                params={
+                    "symbol": td_symbol,
+                    "interval": interval,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "outputsize": 5000,
+                    "apikey": self._api_key,
+                    "format": "JSON",
+                    "type": "forex" if "/" in td_symbol else "commodity",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "code" in data and data["code"] != 200:
+                logger.warning(
+                    "Twelve Data error",
+                    extra={"symbol": td_symbol, "message": data.get("message", "")},
+                )
+                return []
+
+            return data.get("values", [])
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("Twelve Data rate limited, waiting 60s")
+                await asyncio.sleep(60)
+                return await self._fetch_time_series(td_symbol, interval, start_date, end_date)
+            logger.error("Twelve Data HTTP error", extra={"status": e.response.status_code})
+            return []
+        except Exception as e:
+            logger.error("Twelve Data fetch failed", extra={"error": str(e)})
+            return []
+
+    async def backfill_instrument(self, symbol: str, timeframe: str) -> int:
+        """Backfill one instrument × timeframe from Twelve Data."""
+        if timeframe not in TWELVE_DATA_TIMEFRAMES:
+            return 0
+        if symbol in TWELVE_DATA_SKIP:
+            return 0
+
+        inst = INSTRUMENTS.get(symbol)
+        if not inst:
+            return 0
+
+        td_symbol = inst.twelve_data_symbol
+        interval, days_back = TWELVE_DATA_TIMEFRAMES[timeframe]
+
+        # Resume-aware
+        last_ts = await get_latest_timestamp(symbol, timeframe)
+        if last_ts:
+            start = last_ts + timedelta(minutes=1)
+            logger.info("Resuming Twelve Data backfill", extra={"symbol": symbol, "timeframe": timeframe, "from": start.isoformat()})
+        else:
+            start = datetime.now(timezone.utc) - timedelta(days=days_back)
+
+        end = datetime.now(timezone.utc)
+        if start >= end:
+            logger.info("Twelve Data backfill up to date", extra={"symbol": symbol, "timeframe": timeframe})
+            return 0
+
+        values = await self._fetch_time_series(
+            td_symbol,
+            interval,
+            start_date=start.strftime("%Y-%m-%d %H:%M:%S"),
+            end_date=end.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+        if not values:
+            logger.info("No data from Twelve Data", extra={"symbol": symbol, "timeframe": timeframe})
+            return 0
+
+        candles: list[CandleRecord] = []
+        for v in values:
+            try:
+                ts = datetime.strptime(v["datetime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                candles.append(CandleRecord(
+                    instrument=symbol,
+                    timeframe=timeframe,
+                    ts=ts,
+                    open=Decimal(v["open"]),
+                    high=Decimal(v["high"]),
+                    low=Decimal(v["low"]),
+                    close=Decimal(v["close"]),
+                    volume=Decimal(v.get("volume", "0") or "0"),
+                ))
+            except (ValueError, KeyError) as e:
+                logger.debug("Skipping bad bar", extra={"error": str(e)})
+                continue
+
+        total_inserted = 0
+        for i in range(0, len(candles), BATCH_SIZE):
+            batch = candles[i : i + BATCH_SIZE]
+            await upsert_candles(batch)
+            total_inserted += len(batch)
+
+        self._total_candles += total_inserted
+        logger.info(
+            "Twelve Data backfill complete",
+            extra={"symbol": symbol, "timeframe": timeframe, "candles": total_inserted},
+        )
+        return total_inserted
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
 async def main() -> None:
     """CLI entry point for backfill."""
     import argparse
@@ -385,6 +532,7 @@ async def main() -> None:
 
     backfill = HistoricalBackfill()
     fred_backfill = FREDBackfill()
+    td_backfill = TwelveDataBackfill()
     try:
         results = await backfill.backfill_all(symbols, timeframes)
 
@@ -396,6 +544,16 @@ async def main() -> None:
                 count = await fred_backfill.backfill_instrument(symbol, tf)
                 results[key] = count
 
+        # Twelve Data backfill for intraday timeframes (15m, 1h)
+        td_timeframes = [tf for tf in timeframes if tf in TWELVE_DATA_TIMEFRAMES]
+        if td_timeframes:
+            for tf in td_timeframes:
+                for symbol in symbols:
+                    key = f"{symbol}:{tf}"
+                    count = await td_backfill.backfill_instrument(symbol, tf)
+                    results[key] = count
+                    await asyncio.sleep(1)  # Stay under 800 calls/day
+
         total = sum(results.values())
         logger.info(
             "Backfill complete",
@@ -404,6 +562,7 @@ async def main() -> None:
     finally:
         await backfill.close()
         await fred_backfill.close()
+        await td_backfill.close()
         await close_db()
 
 
